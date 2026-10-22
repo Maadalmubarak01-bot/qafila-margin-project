@@ -1,0 +1,42 @@
+
+name: Qafila Project Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Generate sample data
+        run: uv run python tools/make_data.py
+
+      - name: Run pipeline
+        run: uv run python run.py
+
+      - name: Run project checker
+        run: uv run python tools/check.py
+
+      - name: Test pipeline rerun
+        run: |
+          uv run python run.py
+          uv run python tools/check.py
+
+      - name: Test supplier correction
+        run: |
+          uv run python tools/make_data.py --add-correction
+          uv run python run.py
+          uv run python tools/check.py
