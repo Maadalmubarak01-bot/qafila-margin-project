@@ -103,4 +103,4 @@ For daily supplier feeds, I would add scheduled orchestration, schema-change mon
 
 ## AI Assistance
 
-AI assistance was used to help draft and review Python and SQL implementation, testing workflows and project documentation. The implementation was executed and checked through GitHub Actions. Any additional independent verification should be documented before final submission.
+AI assistance was used to help draft and review Python and SQL implementation, testing workflows and project documentation. The implementation was executed and checked through GitHub Actions.
