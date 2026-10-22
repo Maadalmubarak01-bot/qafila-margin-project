@@ -34,9 +34,32 @@ def ingest(data_dir: Path, db: Path) -> None:
 
     Running this twice must not duplicate anything.
     """
-    with duckdb.connect(str(db)) as con:  # closes the file before dbt opens it
-        con.sql("CREATE SCHEMA IF NOT EXISTS raw")
-        raise NotImplementedError("Step 1: load the sources into the raw schema")
+    import csv
+    import sqlite3
+
+    if not (data_dir / "qafila_oltp.sqlite").exists():
+        raise FileNotFoundError(data_dir / "qafila_oltp.sqlite")
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE SCHEMA IF NOT EXISTS raw")
+        with sqlite3.connect(data_dir / "qafila_oltp.sqlite") as source:
+            for table in ("orders", "order_items", "products", "stores"):
+                rows = source.execute(f'SELECT * FROM "{table}"')
+                names = [x[0] for x in rows.description]
+                import pandas as pd
+                frame = pd.DataFrame(rows.fetchall(), columns=names)
+                con.register("incoming", frame)
+                con.execute(f'CREATE OR REPLACE TABLE raw.{table} AS SELECT * FROM incoming')
+                con.unregister("incoming")
+        prices = []
+        for file in sorted((data_dir / "suppliers").glob("prices_*.csv")):
+            with file.open(encoding="utf-8-sig", newline="") as stream:
+                for row in csv.DictReader(stream):
+                    prices.append((file.name, row.get("sku"), row.get("valid_from"),
+                                   row.get("unit_cost", row.get("cost_sar"))))
+        con.execute("""CREATE OR REPLACE TABLE raw.supplier_prices
+                       (source_file VARCHAR, sku VARCHAR, valid_from VARCHAR, raw_cost VARCHAR)""")
+        if prices:
+            con.executemany("INSERT INTO raw.supplier_prices VALUES (?, ?, ?, ?)", prices)
 
 
 def transform(db: Path) -> None:
@@ -59,8 +82,30 @@ def publish(db: Path, warehouse: Path) -> None:
     Update existing tables in place, never drop and recreate them: the table's snapshots are
     how we see what a number was before the supplier's correction arrived.
     """
+    import pyarrow as pa
+    from pyiceberg.exceptions import NoSuchTableError
+
     catalog = get_catalog(warehouse)
-    raise NotImplementedError("Step 5: publish the models to Iceberg")
+    with duckdb.connect(str(db), read_only=True) as con:
+        for namespace, name in (("silver", "product_cost_history"),
+                                ("gold", "weekly_margin"),
+                                ("quality", "price_quarantine")):
+            catalog.create_namespace_if_not_exists(namespace)
+            arrow = con.execute(f'SELECT * FROM {namespace}.{name}').fetch_arrow_table()
+            # Iceberg's overwrite creates a new snapshot without destroying older snapshots.
+            identifier = f"{namespace}.{name}"
+            try:
+                table = catalog.load_table(identifier)
+            except NoSuchTableError:
+                table = catalog.create_table(identifier, schema=arrow.schema)
+                if arrow.num_rows:
+                    table.append(arrow)
+                continue
+            old = table.scan().to_arrow()
+            def canonical(t: pa.Table) -> list[tuple]:
+                return sorted(tuple(str(v) for v in row.values()) for row in t.to_pylist())
+            if canonical(old) != canonical(arrow):
+                table.overwrite(arrow)
 
 
 def main() -> None:
