@@ -1,87 +1,106 @@
-# Qafila gross margin
+# Qafila Gross Margin — Data Engineering Project
 
-Submitted by: Maad Ali Almubarak — academy: @SDAIAAcademy
+**Submitted by:** Maad Ali Almubarak  
+**Academy:** @SDAIAAcademy
 
-The task, rules and grading are in [BRIEF.md](BRIEF.md).
+## Project Overview
 
-```bash
-uv sync
-uv run python tools/make_data.py          # data/
-uv run python run.py                      # data/ -> warehouse/ (DuckDB + Iceberg)
-uv run python tools/check.py              # contract self-check
-```
+This project implements an end-to-end data engineering pipeline for Qafila to calculate weekly gross margins using order transactions and historical supplier costs.
 
-> Replace every `<...>` below. Keep it short: tables and a few sentences are enough.
+The solution uses Python, DuckDB, dbt and Apache Iceberg. Detailed project requirements are available in [BRIEF.md](BRIEF.md).
 
 ## Design
 
-<A one-line flow: files → raw → staging → silver → gold → Iceberg, with the tool at each step.>
+SQLite and supplier CSV files → Python ingestion → DuckDB raw tables → dbt staging → Silver cost history and quality quarantine → Gold weekly margin → Apache Iceberg publication.
 
-| Model | Layer | Grain (one row per ...) | Materialization |
+| Model | Layer | Grain | Materialization |
 |---|---|---|---|
-| | staging | | |
-| `product_cost_history` | silver | | |
-| `weekly_margin` | gold | | |
-| `price_quarantine` | quality | | |
+| Supplier prices and source data | Staging | One record per normalized source row | DuckDB dbt models |
+| product_cost_history | Silver | One record per SKU and changed cost | DuckDB table and Iceberg |
+| weekly_margin | Gold | One record per ISO week, city and category | DuckDB table and Iceberg |
+| price_quarantine | Quality | One record per invalid supplier price row | DuckDB table and Iceberg |
 
-**How the SCD2 history is built:** <2–3 sentences: how you handle missing weeks, unchanged costs and the correction file.>
+### SCD Type 2 Cost History
 
-**How each order line finds its cost:** <1–2 sentences.>
+Supplier prices are standardized and ordered by SKU, effective date and source-file precedence. A new cost-history version is created when the supplier cost changes. Unchanged costs are not duplicated. Missing weeks are covered by carrying forward the previous valid cost until the next change, using exclusive valid-to boundaries.
 
-## Data problems I found
+Supplier correction files are included during subsequent ingestion runs and can revise historical costs. The affected historical versions and downstream margins are recalculated.
 
-| Problem | Where | Rows affected | What I did |
-|---|---|---|---|
-| | | | |
+### Order-Line Cost Matching
 
-## Tests
+Each eligible order line is matched to the historical cost version for its SKU and order date. The selected version must be effective on or before the order date and remain valid at that time. Unmatched order lines contribute to revenue and the uncosted-line count but not to calculated cost or margin.
 
-| Test | On | What it protects against |
-|---|---|---|
-| | | |
+## Data Quality
 
-## Re-runs and the correction
+| Problem | Treatment |
+|---|---|
+| Unknown supplier SKU | Quarantine with unknown_sku reason |
+| Invalid or nonpositive supplier cost | Quarantine with invalid_cost reason |
+| Arabic-Indic numerals | Normalize to standard numeric representation |
+| Duplicate or superseded supplier prices | Apply deterministic precedence and cost-change logic |
+| Missing weekly supplier prices | Carry forward the applicable historical cost |
+| UTC and Riyadh date differences | Convert timestamps to the business timezone |
 
-<Show that a second run changes nothing, and that after the correction an older Iceberg snapshot still holds the old numbers: snapshot ids and one number before and after.>
+The initial sample dataset produced 7 quarantine records. After the supplier correction, the quarantine table still contained 7 records.
 
-## What I'd do next
+## Automated Tests
 
-<What would break first with 100× more data, or with daily supplier files?>
+| Validation | Result |
+|---|---|
+| Initial project checker | 22/22 passed |
+| Checker after supplier correction | 22/22 passed |
+| dbt tests after correction | 8 passed, 0 warnings, 0 errors |
+| SCD Type 2 history checks | Passed |
+| Quarantine validation | Passed |
+| Weekly margin contract checks | Passed |
+| Pipeline rerun | GitHub Actions step passed |
+| Supplier correction | GitHub Actions step passed |
 
-## AI assistance
+The initial run produced 633 cost-history rows, 165 weekly-margin rows and 7 quarantine rows. After correction, cost history contained 637 rows, with 165 weekly-margin rows and 7 quarantine rows.
 
-<None, or what you used and for what.>
+## Reruns and Iceberg Snapshots
 
+The pipeline was executed initially, rerun, and executed after generating a supplier correction.
 
-## Implementation notes
+The automated checker reported three snapshots for gold.weekly_margin after the correction workflow. This confirms snapshot creation and retention during the tested sequence.
 
-- `raw`: complete reload of four SQLite source tables and all supplier files on each execution; each price row retains `source_file`.
-- `staging`: normalized SKU, Unicode Arabic-Indic numeric conversion, and UTC-to-Riyadh date conversion.
-- `quality.price_quarantine`: one row per invalid input row; unknown SKU takes precedence over invalid cost.
-- `silver.product_cost_history`: one row per SKU and changed cost; last filename wins per SKU/date; missing weeks carry forward via half-open intervals.
-- `gold.weekly_margin`: one row per ISO week × city × category; revenue includes uncosted lines but cost and margin do not.
-- `publish`: compares content before overwriting Iceberg; unchanged reruns do not add snapshots; changed content overwrites in place preserving prior snapshots.
+A separate historical time-travel query and before/after margin-value comparison remain to be documented. Snapshot IDs and numerical comparison evidence should be added after that verification.
 
-## Commands
+## Running the Project
 
 ```bash
 uv sync
 uv run python tools/make_data.py
 uv run python run.py
 uv run python tools/check.py
-uv run python run.py  # idempotence
+```
+
+### Rerun and correction validation
+
+```bash
+uv run python run.py
+uv run python tools/check.py
 uv run python tools/make_data.py --add-correction
 uv run python run.py
 uv run python tools/check.py
+```
+
+### Alternate dataset validation
+
+```bash
 uv run python tools/make_data.py --seed 11 --out data_11
 uv run python run.py --data-dir data_11 --warehouse warehouse_11
 uv run python tools/check.py --data-dir data_11 --warehouse warehouse_11
 ```
 
-## AI assistance
+The alternate-seed commands are provided for additional testing; successful execution on that dataset has not yet been verified.
 
-AI assistance was used to draft Python and SQL implementation and testing instructions. Review, understand, validate and adapt the code before submitting as individual work.
+## What I'd Do Next
 
-## Verification still required
+For 100 times more data, the main challenges would include full-table reload costs, transformation performance and growing historical tables. Incremental ingestion, partition pruning, data-quality monitoring and optimized Iceberg maintenance would become important.
 
-Fill in actual data-quality counts, dbt test results, pre/post-correction snapshot IDs and margin figures after running locally. Do not claim unexecuted tests passed.
+For daily supplier feeds, I would add scheduled orchestration, schema-change monitoring, ingestion audit metadata, late-arriving correction handling and alerts for failed quality checks.
+
+## AI Assistance
+
+AI assistance was used to help draft and review Python and SQL implementation, testing workflows and project documentation. The implementation was executed and checked through GitHub Actions. Any additional independent verification should be documented before final submission.
